@@ -585,6 +585,13 @@ func initApp() {
 	chatStorageRepo = chatstorage.NewStorageRepository(chatStorageDB)
 	chatStorageRepo.InitializeSchema()
 
+	// Sealed-fork privacy: purge any pre-cutover plaintext message history that may
+	// still linger in chatstorage.db from before message writes were disabled. Runs
+	// against the chat-storage DB handle only (never the device-session DB), is
+	// idempotent (0 rows after the first boot), and is fail-soft (a purge error logs
+	// a warning but never blocks startup).
+	purgeStoredMessageHistory(chatStorageDB)
+
 	whatsappDB := whatsapp.InitWaDB(ctx, config.DBURI)
 	var keysDB *sqlstore.Container
 	if config.DBKeysURI != "" {
@@ -609,6 +616,36 @@ func initApp() {
 	groupUsecase = usecase.NewGroupService()
 	newsletterUsecase = usecase.NewNewsletterService()
 	deviceUsecase = usecase.NewDeviceService(dm)
+}
+
+// purgeStoredMessageHistory deletes every row from the chat-storage message-content
+// tables (messages and the directly message-bound reaction/edit tables). It operates
+// solely on the chat-storage DB handle and never touches the WhatsApp session store
+// (DB_URI / whatsapp.db) or whatsmeow. Safe to run on every boot: after the first
+// purge it simply deletes 0 rows. Errors are logged and swallowed so a failed purge
+// can never crash the gateway.
+func purgeStoredMessageHistory(db *sql.DB) {
+	if db == nil {
+		return
+	}
+
+	// Order is not strictly required (no FK cascade is relied upon), but clearing the
+	// dependent content tables before the primary messages table keeps intent clear.
+	tables := []string{"message_reactions", "message_edits", "messages"}
+
+	var total int64
+	for _, table := range tables {
+		result, err := db.Exec("DELETE FROM " + table)
+		if err != nil {
+			logrus.Warnf("[PRIVACY] failed to purge chatstorage table %q: %v", table, err)
+			continue
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+
+	logrus.Infof("[PRIVACY] purged %d stored messages from chatstorage", total)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

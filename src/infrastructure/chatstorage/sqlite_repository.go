@@ -481,6 +481,12 @@ func (r *SQLiteRepository) DeleteReaction(messageID, reactorJID, deviceID string
 
 // GetMessages retrieves messages with filtering
 func (r *SQLiteRepository) GetMessages(filter *domainChatStorage.MessageFilter) ([]*domainChatStorage.Message, error) {
+	// Sealed fork: stored message history is never served. The read path used by
+	// GET /chat/{jid}/messages returns no messages so conversation content can never
+	// be exposed, even if a row somehow existed. Signature preserved for callers.
+	return nil, nil
+
+	//nolint:govet // unreachable: message read path is intentionally disabled.
 	// Require device_id for data isolation - fail fast if missing
 	if filter.DeviceID == "" {
 		return nil, fmt.Errorf("device_id is required for message queries (data isolation)")
