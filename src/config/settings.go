@@ -147,4 +147,11 @@ var (
 	// the sealed fork cannot leak plaintext through those exits; operators must
 	// opt in explicitly via NOVA_ALLOW_PLAINTEXT_EXITS=true.
 	NovaAllowPlaintextExits = false
+
+	// MediaSweepTTLMinutes is the maximum age (in minutes) that downloaded media
+	// files are allowed to live on disk before the periodic privacy sweep deletes
+	// them. Nova fetches a just-received media_url shortly after delivery, so the
+	// default (60) leaves a comfortable window while bounding plaintext-at-rest.
+	// Override via MEDIA_SWEEP_TTL_MINUTES.
+	MediaSweepTTLMinutes = 60
 )

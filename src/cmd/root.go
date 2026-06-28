@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -262,6 +263,11 @@ func initEnvConfig() {
 	}
 	if viper.IsSet("nova_allow_plaintext_exits") {
 		config.NovaAllowPlaintextExits = viper.GetBool("nova_allow_plaintext_exits")
+	}
+	if viper.IsSet("media_sweep_ttl_minutes") {
+		if ttl := viper.GetInt("media_sweep_ttl_minutes"); ttl > 0 {
+			config.MediaSweepTTLMinutes = ttl
+		}
 	}
 }
 
@@ -592,6 +598,12 @@ func initApp() {
 	// a warning but never blocks startup).
 	purgeStoredMessageHistory(chatStorageDB)
 
+	// Sealed-fork privacy: remove any stray plaintext artifacts already on the
+	// volume (history-sync JSON dumps + downloaded media in storages/), then start
+	// the periodic media sweep that bounds plaintext media-at-rest to a TTL.
+	cleanupStrayContentFiles()
+	startMediaSweep()
+
 	whatsappDB := whatsapp.InitWaDB(ctx, config.DBURI)
 	var keysDB *sqlstore.Container
 	if config.DBKeysURI != "" {
@@ -646,6 +658,131 @@ func purgeStoredMessageHistory(db *sql.DB) {
 	}
 
 	logrus.Infof("[PRIVACY] purged %d stored messages from chatstorage", total)
+
+	// Reclaim the freed pages so deleted content is not recoverable from the file:
+	// fold the WAL back into the main DB (TRUNCATE drops the -wal file), then VACUUM
+	// to rewrite the database without the deleted rows. Both are fail-soft.
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		logrus.Warnf("[PRIVACY] wal_checkpoint(TRUNCATE) failed: %v", err)
+	}
+	if _, err := db.Exec("VACUUM"); err != nil {
+		logrus.Warnf("[PRIVACY] VACUUM failed: %v", err)
+	} else {
+		logrus.Infof("[PRIVACY] chatstorage vacuumed")
+	}
+}
+
+// storagesMediaExtensions lists the media file extensions that may have been
+// downloaded into storages/. Used by both the boot cleanup and the periodic sweep.
+var storagesMediaExtensions = []string{
+	"jpeg", "jpg", "png", "gif", "webp", "mp4", "ogg", "opus", "oga", "m4a", "pdf", "bin",
+}
+
+// storagesMediaGlobs returns one glob per media extension under config.PathStorages.
+func storagesMediaGlobs() []string {
+	globs := make([]string, 0, len(storagesMediaExtensions))
+	for _, ext := range storagesMediaExtensions {
+		globs = append(globs, filepath.Join(config.PathStorages, "*."+ext))
+	}
+	return globs
+}
+
+// cleanupStrayContentFiles deletes leftover plaintext artifacts in storages/ at
+// boot: history-sync JSON dumps (history-*.json) and any downloaded media files.
+// Fail-soft: every error is logged and skipped so a cleanup failure can never
+// block startup.
+func cleanupStrayContentFiles() {
+	dumps := 0
+	historyGlob := filepath.Join(config.PathStorages, "history-*.json")
+	if files, err := filepath.Glob(historyGlob); err != nil {
+		logrus.Warnf("[PRIVACY] glob %q failed: %v", historyGlob, err)
+	} else {
+		for _, f := range files {
+			if err := os.Remove(f); err != nil {
+				logrus.Warnf("[PRIVACY] failed to delete history dump %q: %v", f, err)
+				continue
+			}
+			dumps++
+		}
+	}
+
+	media := 0
+	for _, glob := range storagesMediaGlobs() {
+		files, err := filepath.Glob(glob)
+		if err != nil {
+			logrus.Warnf("[PRIVACY] glob %q failed: %v", glob, err)
+			continue
+		}
+		for _, f := range files {
+			if err := os.Remove(f); err != nil {
+				logrus.Warnf("[PRIVACY] failed to delete stray media %q: %v", f, err)
+				continue
+			}
+			media++
+		}
+	}
+
+	logrus.Infof("[PRIVACY] deleted %d history dumps, %d stray media", dumps, media)
+}
+
+// startMediaSweep launches the background privacy sweep: one immediate pass, then
+// one every 5 minutes. Each pass is panic-safe (see sweepMediaOnce) so a faulty
+// iteration can never crash the gateway and the ticker loop keeps running.
+func startMediaSweep() {
+	go func() {
+		sweepMediaOnce()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			sweepMediaOnce()
+		}
+	}()
+}
+
+// sweepMediaOnce deletes media files older than config.MediaSweepTTLMinutes from
+// the media directories (statics/media, statics/senditems, storages/). Files newer
+// than the TTL are kept so Nova can still fetch a just-received media_url. Panic-
+// and fail-soft: a recover guards the whole pass and per-file errors are skipped.
+func sweepMediaOnce() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logrus.Errorf("[PRIVACY] media sweep recovered from panic: %v", rec)
+		}
+	}()
+
+	ttlMinutes := config.MediaSweepTTLMinutes
+	cutoff := time.Now().Add(-time.Duration(ttlMinutes) * time.Minute)
+
+	globs := []string{
+		filepath.Join(config.PathMedia, "*"),
+		filepath.Join(config.PathSendItems, "*"),
+	}
+	globs = append(globs, storagesMediaGlobs()...)
+
+	removed := 0
+	for _, glob := range globs {
+		files, err := filepath.Glob(glob)
+		if err != nil {
+			logrus.Warnf("[PRIVACY] media sweep glob %q failed: %v", glob, err)
+			continue
+		}
+		for _, f := range files {
+			info, err := os.Stat(f)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if info.ModTime().After(cutoff) {
+				continue // newer than TTL — Nova may still fetch it
+			}
+			if err := os.Remove(f); err != nil {
+				logrus.Warnf("[PRIVACY] media sweep failed to delete %q: %v", f, err)
+				continue
+			}
+			removed++
+		}
+	}
+
+	logrus.Infof("[PRIVACY] media sweep removed %d files older than %dm", removed, ttlMinutes)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

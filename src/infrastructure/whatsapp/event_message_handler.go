@@ -81,20 +81,13 @@ func buildMessageMetaParts(evt *events.Message) []string {
 	return metaParts
 }
 
-func handleImageMessage(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
-	if !config.WhatsappAutoDownloadMedia {
-		return
-	}
-	if client == nil {
-		return
-	}
-	if img := evt.Message.GetImageMessage(); img != nil {
-		if extracted, err := utils.ExtractMedia(ctx, client, config.PathStorages, img); err != nil {
-			log.Errorf("Failed to download image: %v", err)
-		} else {
-			log.Infof("Image downloaded to %s", extracted.MediaPath)
-		}
-	}
+func handleImageMessage(_ context.Context, _ *events.Message, _ *whatsmeow.Client) {
+	// Sealed fork: this path used to download inbound images to config.PathStorages
+	// ("storages/") and only log the file path — there is no consumer of that copy.
+	// The webhook media that Nova actually fetches is written separately to
+	// config.PathMedia ("statics/media") by event_message.go, which is untouched.
+	// Suppress this redundant plaintext-media-at-rest writer entirely.
+	log.Debugf("[PRIVACY] redundant storages image download suppressed")
 }
 
 func handleAutoMarkRead(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
@@ -427,6 +428,12 @@ func (r *SQLiteRepository) StoreMessagesBatch(messages []*domainChatStorage.Mess
 
 // StoreReaction creates, updates, or removes a message reaction.
 func (r *SQLiteRepository) StoreReaction(reaction *domainChatStorage.Reaction) error {
+	// Sealed fork: store NO reaction content. A reaction (emoji + which message +
+	// who reacted) is message-adjacent content, so it must never be persisted —
+	// same posture as StoreMessage above.
+	return nil
+
+	//nolint:govet // unreachable: reaction persistence is intentionally disabled.
 	if reaction == nil {
 		return nil
 	}
@@ -864,6 +871,12 @@ func (r *SQLiteRepository) GetLatestUnreadChatwootMessageLinkByChat(deviceID, wa
 }
 
 func (r *SQLiteRepository) EnqueueChatwootForwardEvent(event *domainChatStorage.ChatwootForwardEvent) error {
+	// Sealed fork: payload_json can carry plaintext message content. Persist it
+	// only when the operator has explicitly opted into plaintext exits; otherwise
+	// drop the enqueue silently (no row written).
+	if !config.NovaAllowPlaintextExits {
+		return nil
+	}
 	if event == nil || strings.TrimSpace(event.DeviceID) == "" || strings.TrimSpace(event.EventName) == "" || strings.TrimSpace(event.WhatsAppMessageID) == "" || strings.TrimSpace(event.PayloadJSON) == "" {
 		return fmt.Errorf("chatwoot forward event requires device id, event name, whatsapp message id, and payload")
 	}
