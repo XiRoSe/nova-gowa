@@ -1313,6 +1313,65 @@ func (r *SQLiteRepository) GetChatNameWithPushNameByDevice(deviceID string, jid 
 func (r *SQLiteRepository) CreateMessage(ctx context.Context, evt *events.Message) error {
 	// Sealed fork: store NO message content. Incoming messages are forwarded to
 	// the (sealed) webhook only; nothing is persisted to chatstorage.db.
+	//
+	// We MUST still resolve the chat's human-readable display name and (re-)seal
+	// it via StoreChat, otherwise chat names would never get populated on
+	// incoming messages. This is done fail-soft (any panic/error is swallowed)
+	// and touches ONLY the chats table — never messages/edits/reactions.
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logrus.Warnf("CreateMessage: recovered while sealing chat name: %v", rec)
+			}
+		}()
+
+		if evt == nil || evt.Message == nil {
+			return
+		}
+
+		// Get WhatsApp client for LID resolution (device-scoped if present in context)
+		client := whatsapp.ClientFromContext(ctx)
+		deviceID := ""
+		if inst, ok := whatsapp.DeviceFromContext(ctx); ok && inst != nil {
+			deviceID = inst.JID()
+			if deviceID == "" {
+				deviceID = inst.ID()
+			}
+		}
+		if deviceID == "" && client != nil && client.Store != nil && client.Store.ID != nil {
+			deviceID = client.Store.ID.ToNonAD().String()
+		}
+
+		// Normalize chat and sender JIDs (convert @lid to @s.whatsapp.net)
+		normalizedChatJID := whatsapp.NormalizeJIDFromLID(ctx, evt.Info.Chat, client)
+		normalizedSender := whatsapp.NormalizeJIDFromLID(ctx, evt.Info.Sender, client)
+
+		chatJID := normalizedChatJID.String()
+
+		// Resolve the human-readable chat name (pushName > senderUser > JID user).
+		chatName := r.GetChatNameWithPushNameByDevice(deviceID, normalizedChatJID, chatJID, normalizedSender.User, evt.Info.PushName)
+
+		// Preserve existing ephemeral/archived flags if the chat already exists.
+		existingChat, _ := r.GetChatByDevice(deviceID, chatJID)
+
+		chat := &domainChatStorage.Chat{
+			DeviceID:        deviceID,
+			JID:             chatJID,
+			Name:            chatName,
+			LastMessageTime: evt.Info.Timestamp,
+		}
+		if existingChat != nil {
+			chat.EphemeralExpiration = existingChat.EphemeralExpiration
+			chat.Archived = existingChat.Archived
+		}
+
+		// StoreChat seals the name (NSEAL:<epoch>:<ct>) before it touches the column.
+		if err := r.StoreChat(chat); err != nil {
+			logrus.Warnf("CreateMessage: failed to store sealed chat name: %v", err)
+		}
+	}()
+
+	// Sealed fork: never persist message content.
 	return nil
 
 	//nolint:govet // unreachable: incoming-message persistence is intentionally disabled.
