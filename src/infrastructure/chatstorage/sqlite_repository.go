@@ -11,6 +11,7 @@ import (
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/seal"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -28,16 +29,38 @@ func NewStorageRepository(db *sql.DB) domainChatStorage.IChatStorageRepository {
 	return &SQLiteRepository{db: db}
 }
 
+// sealChatName transforms a chat display name into the NSEAL wire format
+// `NSEAL:<epoch>:<ctB64>` so the name is encrypted at rest under Nova's epoch
+// public key — the same sealed-box mechanism used for message bodies. Nova
+// distinguishes sealed names by the `NSEAL:` sentinel and decrypts them at read
+// time; GOWA itself cannot and must not decrypt. FAIL-CLOSED: an empty name
+// stays empty, and a sealing failure yields "" so the plaintext name is NEVER
+// persisted.
+func sealChatName(name string) string {
+	if name == "" {
+		return ""
+	}
+	epochID, ctB64, err := seal.Seal([]byte(name))
+	if err != nil {
+		logrus.Warnf("seal: dropping chat name (no plaintext stored): %v", err)
+		return ""
+	}
+	return fmt.Sprintf("NSEAL:%d:%s", epochID, ctB64)
+}
+
 // StoreChat creates or updates a chat
 func (r *SQLiteRepository) StoreChat(chat *domainChatStorage.Chat) error {
 	now := time.Now()
 	chat.UpdatedAt = now
 
+	// Seal the display name before it touches the column (both update + insert).
+	sealedName := sealChatName(chat.Name)
+
 	// Try update first, then insert if no rows affected (cross-db compatible)
 	result, err := r.db.Exec(`
 		UPDATE chats SET name = ?, last_message_time = ?, ephemeral_expiration = ?, updated_at = ?, archived = ?
 		WHERE jid = ? AND device_id = ?
-	`, chat.Name, chat.LastMessageTime, chat.EphemeralExpiration, chat.UpdatedAt, chat.Archived, chat.JID, chat.DeviceID)
+	`, sealedName, chat.LastMessageTime, chat.EphemeralExpiration, chat.UpdatedAt, chat.Archived, chat.JID, chat.DeviceID)
 	if err != nil {
 		return err
 	}
@@ -47,7 +70,7 @@ func (r *SQLiteRepository) StoreChat(chat *domainChatStorage.Chat) error {
 		_, err = r.db.Exec(`
 			INSERT INTO chats (jid, device_id, name, last_message_time, ephemeral_expiration, created_at, updated_at, archived)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, chat.JID, chat.DeviceID, chat.Name, chat.LastMessageTime, chat.EphemeralExpiration, now, chat.UpdatedAt, chat.Archived)
+		`, chat.JID, chat.DeviceID, sealedName, chat.LastMessageTime, chat.EphemeralExpiration, now, chat.UpdatedAt, chat.Archived)
 	}
 	return err
 }

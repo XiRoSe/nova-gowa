@@ -659,6 +659,15 @@ func purgeStoredMessageHistory(db *sql.DB) {
 
 	logrus.Infof("[PRIVACY] purged %d stored messages from chatstorage", total)
 
+	// Wipe any plaintext chat names left at rest from before names were sealed.
+	// Sealed names (NSEAL:<epoch>:<ct>) are kept; legacy plaintext names are
+	// cleared and re-seal on the next message for that chat. Fail-soft.
+	if result, err := db.Exec("UPDATE chats SET name = '' WHERE name IS NOT NULL AND name NOT LIKE 'NSEAL:%'"); err != nil {
+		logrus.Warnf("[PRIVACY] failed to clear plaintext chat names: %v", err)
+	} else if n, err := result.RowsAffected(); err == nil {
+		logrus.Infof("[PRIVACY] cleared %d plaintext chat names", n)
+	}
+
 	// Reclaim the freed pages so deleted content is not recoverable from the file:
 	// fold the WAL back into the main DB (TRUNCATE drops the -wal file), then VACUUM
 	// to rewrite the database without the deleted rows. Both are fail-soft.
