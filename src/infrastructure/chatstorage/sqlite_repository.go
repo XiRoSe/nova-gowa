@@ -304,6 +304,11 @@ func (r *SQLiteRepository) DeleteChatByDevice(deviceID, jid string) error {
 
 // StoreMessage creates or updates a message
 func (r *SQLiteRepository) StoreMessage(message *domainChatStorage.Message) error {
+	// Sealed fork: store NO message content. chatstorage.db must never hold
+	// message bodies; conversation history lives only in Nova's encrypted store.
+	return nil
+
+	//nolint:govet // unreachable: message persistence is intentionally disabled.
 	now := time.Now()
 	message.CreatedAt = now
 	message.UpdatedAt = now
@@ -345,6 +350,11 @@ func (r *SQLiteRepository) StoreMessage(message *domainChatStorage.Message) erro
 
 // StoreMessagesBatch creates or updates multiple messages in a single transaction
 func (r *SQLiteRepository) StoreMessagesBatch(messages []*domainChatStorage.Message) error {
+	// Sealed fork: store NO message history. The bulk/history-sync insert path is
+	// disabled so chatstorage.db never accumulates message content.
+	return nil
+
+	//nolint:govet // unreachable: batch persistence is intentionally disabled.
 	if len(messages) == 0 {
 		return nil
 	}
@@ -556,6 +566,11 @@ func (r *SQLiteRepository) GetMessages(filter *domainChatStorage.MessageFilter) 
 
 // SearchMessages performs database-level search for messages containing specific text
 func (r *SQLiteRepository) SearchMessages(deviceID, chatJID, searchText string, limit int) ([]*domainChatStorage.Message, error) {
+	// Sealed fork: message content is never stored, so full-text search over it
+	// is disabled and always returns no matches (never a plaintext exit).
+	return []*domainChatStorage.Message{}, nil
+
+	//nolint:govet // unreachable: content search is intentionally disabled.
 	// Require device_id for data isolation - fail fast if missing
 	if deviceID == "" {
 		return nil, fmt.Errorf("device_id is required for message search (data isolation)")
@@ -1254,6 +1269,11 @@ func (r *SQLiteRepository) GetChatNameWithPushNameByDevice(deviceID string, jid 
 }
 
 func (r *SQLiteRepository) CreateMessage(ctx context.Context, evt *events.Message) error {
+	// Sealed fork: store NO message content. Incoming messages are forwarded to
+	// the (sealed) webhook only; nothing is persisted to chatstorage.db.
+	return nil
+
+	//nolint:govet // unreachable: incoming-message persistence is intentionally disabled.
 	if evt == nil || evt.Message == nil {
 		return nil
 	}
@@ -1503,7 +1523,9 @@ func (r *SQLiteRepository) getMessageByDeviceAndChatIDAndMessageID(deviceID, cha
 }
 
 func (r *SQLiteRepository) StoreMessageEdit(edit *domainChatStorage.MessageEdit) error {
-	return r.storeMessageEditExec(r.db, edit)
+	// Sealed fork: store NO message content. Edit history carries previous/new
+	// message text, so it is not persisted.
+	return nil
 }
 
 func (r *SQLiteRepository) storeMessageEditExec(execer interface {
@@ -1763,6 +1785,11 @@ func (r *SQLiteRepository) TruncateAllDataWithLogging(logPrefix string) error {
 
 // StoreSentMessageWithContext stores a message that was sent by the user with context cancellation support
 func (r *SQLiteRepository) StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time, msg *waE2E.Message) error {
+	// Sealed fork: store NO message content. Outgoing message bodies are not
+	// persisted to chatstorage.db.
+	return nil
+
+	//nolint:govet // unreachable: sent-message persistence is intentionally disabled.
 	// Check if context is already cancelled before starting
 	select {
 	case <-ctx.Done():

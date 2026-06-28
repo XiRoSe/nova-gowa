@@ -132,4 +132,19 @@ var (
 	// message when the opposite side reports deletion.
 	ChatwootMessageRead   = false
 	ChatwootMessageDelete = false
+
+	// --- Nova sealed fork settings ---------------------------------------
+	// SealPubkeyURL is Nova's GET endpoint returning the current epoch sealing
+	// public key ({"epoch_id":<int>,"public_key":"<base64 32-byte X25519>"}).
+	// SealPubkeyToken is sent as the X-Internal-Token header on that request.
+	// When unset, sealing fails closed: webhook message bodies are dropped
+	// rather than emitted as plaintext.
+	SealPubkeyURL   = ""
+	SealPubkeyToken = ""
+
+	// NovaAllowPlaintextExits gates the legacy paths that would read a message
+	// body as clear text (Chatwoot forwarding, auto-reply). It defaults OFF so
+	// the sealed fork cannot leak plaintext through those exits; operators must
+	// opt in explicitly via NOVA_ALLOW_PLAINTEXT_EXITS=true.
+	NovaAllowPlaintextExits = false
 )

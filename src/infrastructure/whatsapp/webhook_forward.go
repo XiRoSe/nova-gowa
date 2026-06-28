@@ -86,7 +86,10 @@ func getContactMutex(phone string) *sync.Mutex {
 // successful targets still receive the event.
 func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]any, eventName string) error {
 	webhookAllowed := len(config.WhatsappWebhookEvents) == 0 || isEventWhitelisted(eventName)
-	chatwootAllowed := config.ChatwootEnabled && shouldForwardEventToChatwoot(eventName) && isEventWhitelistedForChatwoot(eventName)
+	// Sealed fork: the Chatwoot path reads the message body as clear text, so it
+	// is gated behind NOVA_ALLOW_PLAINTEXT_EXITS (default OFF) to prevent a
+	// plaintext leak. The webhook body itself is sealed regardless.
+	chatwootAllowed := config.NovaAllowPlaintextExits && config.ChatwootEnabled && shouldForwardEventToChatwoot(eventName) && isEventWhitelistedForChatwoot(eventName)
 
 	if !webhookAllowed && !chatwootAllowed {
 		logrus.Debugf("Skipping event %s - not allowed for webhooks or Chatwoot", eventName)

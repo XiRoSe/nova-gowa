@@ -12,12 +12,48 @@ import (
 	"go.mau.fi/whatsmeow/types"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/seal"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
 var reMention = regexp.MustCompile(`\B@\w+`)
+
+// setSealedBody seals plaintext to Nova's epoch public key and writes the
+// sealed ciphertext to payload["body"] together with payload["epoch_id"], which
+// is exactly the shape Nova's parse_inbound reads (epoch_id alongside body in
+// the message payload dict). Fail-closed: an empty plaintext is a no-op, and a
+// sealing failure drops the body entirely — plaintext is NEVER written.
+func setSealedBody(payload map[string]any, plaintext string) {
+	if plaintext == "" {
+		return
+	}
+	epochID, ciphertextB64, err := seal.Seal([]byte(plaintext))
+	if err != nil {
+		logrus.Warnf("seal: dropping message body (no plaintext emitted): %v", err)
+		return
+	}
+	payload["body"] = ciphertextB64
+	payload["epoch_id"] = epochID
+}
+
+// sealedCaption seals a media caption to Nova's epoch public key, recording
+// epoch_id on the top-level payload, and returns the base64 sealed ciphertext.
+// Fail-closed: an empty caption or a sealing failure yields "" so plaintext is
+// never embedded in the media object.
+func sealedCaption(payload map[string]any, caption string) string {
+	if caption == "" {
+		return ""
+	}
+	epochID, ciphertextB64, err := seal.Seal([]byte(caption))
+	if err != nil {
+		logrus.Warnf("seal: dropping media caption (no plaintext emitted): %v", err)
+		return ""
+	}
+	payload["epoch_id"] = epochID
+	return ciphertextB64
+}
 
 // Event types for webhook payload
 const (
@@ -142,9 +178,9 @@ func buildEventPayload(ctx context.Context, client *whatsmeow.Client, evt *event
 			}
 			if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
 				if editedText := editedMessage.GetExtendedTextMessage(); editedText != nil {
-					payload["body"] = editedText.GetText()
+					setSealedBody(payload, editedText.GetText())
 				} else if editedConv := editedMessage.GetConversation(); editedConv != "" {
-					payload["body"] = editedConv
+					setSealedBody(payload, editedConv)
 				}
 			}
 			return EventTypeMessageEdited, payload, nil
@@ -214,16 +250,16 @@ func buildMessageBody(ctx context.Context, client *whatsmeow.Client, evt *events
 				}
 			}
 		}
-		payload["body"] = message.Text
+		setSealedBody(payload, message.Text)
 	} else if message.Text != "" {
-		payload["body"] = message.Text
+		setSealedBody(payload, message.Text)
 	}
 
 	// Fallback: extract caption from media messages if no text body was set
 	if _, hasBody := payload["body"]; !hasBody {
 		msg := utils.UnwrapMessage(evt.Message)
 		if caption := utils.ExtractMediaCaption(msg); caption != "" {
-			payload["body"] = caption
+			setSealedBody(payload, caption)
 		}
 	}
 
@@ -288,7 +324,7 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 				// downstream consumers, instead of dropping the whole event.
 				logrus.Errorf("Failed to download document: %v", err)
 			} else {
-				payload["document"] = buildAutoDownloadPayload(extracted)
+				payload["document"] = buildAutoDownloadPayload(payload, extracted)
 			}
 		} else {
 			payload["document"] = map[string]any{
@@ -307,12 +343,12 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 				// downstream consumers, instead of dropping the whole event.
 				logrus.Errorf("Failed to download image: %v", err)
 			} else {
-				payload["image"] = buildAutoDownloadPayload(extracted)
+				payload["image"] = buildAutoDownloadPayload(payload, extracted)
 			}
 		} else {
 			payload["image"] = map[string]any{
 				"url":     imageMedia.GetURL(),
-				"caption": imageMedia.GetCaption(),
+				"caption": sealedCaption(payload, imageMedia.GetCaption()),
 			}
 		}
 	}
@@ -344,12 +380,12 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 				// downstream consumers, instead of dropping the whole event.
 				logrus.Errorf("Failed to download video: %v", err)
 			} else {
-				payload["video"] = buildAutoDownloadPayload(extracted)
+				payload["video"] = buildAutoDownloadPayload(payload, extracted)
 			}
 		} else {
 			payload["video"] = map[string]any{
 				"url":     videoMedia.GetURL(),
-				"caption": videoMedia.GetCaption(),
+				"caption": sealedCaption(payload, videoMedia.GetCaption()),
 			}
 		}
 	}
@@ -363,12 +399,12 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 				// downstream consumers, instead of dropping the whole event.
 				logrus.Errorf("Failed to download video note: %v", err)
 			} else {
-				payload["video_note"] = buildAutoDownloadPayload(extracted)
+				payload["video_note"] = buildAutoDownloadPayload(payload, extracted)
 			}
 		} else {
 			payload["video_note"] = map[string]any{
 				"url":     ptvMedia.GetURL(),
-				"caption": ptvMedia.GetCaption(),
+				"caption": sealedCaption(payload, ptvMedia.GetCaption()),
 			}
 		}
 	}
@@ -377,12 +413,15 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 }
 
 // buildAutoDownloadPayload builds the media payload for auto-downloaded media.
-// Returns just the path string if no caption (backward compatible), or a map with path+caption.
-func buildAutoDownloadPayload(extracted utils.ExtractedMedia) any {
-	if extracted.Caption != "" {
+// Returns just the path string if no caption (backward compatible), or a map
+// with path + SEALED caption. The caption is sealed to Nova's epoch key (epoch_id
+// recorded on payload); a sealing failure drops the caption rather than emitting
+// it as plaintext.
+func buildAutoDownloadPayload(payload map[string]any, extracted utils.ExtractedMedia) any {
+	if sealedCap := sealedCaption(payload, extracted.Caption); sealedCap != "" {
 		return map[string]any{
 			"path":    extracted.MediaPath,
-			"caption": extracted.Caption,
+			"caption": sealedCap,
 		}
 	}
 	return extracted.MediaPath

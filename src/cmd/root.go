@@ -252,6 +252,17 @@ func initEnvConfig() {
 	if viper.IsSet("chatwoot_message_delete") {
 		config.ChatwootMessageDelete = viper.GetBool("chatwoot_message_delete")
 	}
+
+	// Nova sealed fork settings
+	if envSealPubkeyURL := viper.GetString("seal_pubkey_url"); envSealPubkeyURL != "" {
+		config.SealPubkeyURL = envSealPubkeyURL
+	}
+	if envSealPubkeyToken := viper.GetString("seal_pubkey_token"); envSealPubkeyToken != "" {
+		config.SealPubkeyToken = envSealPubkeyToken
+	}
+	if viper.IsSet("nova_allow_plaintext_exits") {
+		config.NovaAllowPlaintextExits = viper.GetBool("nova_allow_plaintext_exits")
+	}
 }
 
 func initFlags() {
@@ -556,6 +567,14 @@ func initApp() {
 	}
 
 	ctx := context.Background()
+
+	// Sealed-fork safety: the device-session DB (DB_URI / whatsapp.db) and the
+	// chat-storage DB (ChatStorageURI / chatstorage.db) must be distinct files.
+	// Sharing one file would let message-content writes land in the same DB as
+	// the WhatsApp session — defeating the "store no message history" guarantee.
+	if config.DBURI == config.ChatStorageURI {
+		logrus.Fatalf("refusing to start: DB_URI and ChatStorageURI point at the same store (%q); they must be distinct so message content is never co-located with the device session", config.DBURI)
+	}
 
 	chatStorageDB, err = initChatStorage()
 	if err != nil {

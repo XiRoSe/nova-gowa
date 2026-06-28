@@ -53,8 +53,12 @@ func handleMessage(ctx context.Context, evt *events.Message, chatStorageRepo dom
 	// Auto-mark message as read if configured
 	handleAutoMarkRead(ctx, evt, client)
 
-	// Handle auto-reply if configured
-	handleAutoReply(ctx, evt, chatStorageRepo, client)
+	// Handle auto-reply if configured. Sealed fork: gated behind
+	// NOVA_ALLOW_PLAINTEXT_EXITS (default OFF) so this legacy path cannot act on
+	// or echo plaintext message content.
+	if config.NovaAllowPlaintextExits {
+		handleAutoReply(ctx, evt, chatStorageRepo, client)
+	}
 
 	// Forward to webhook if configured
 	handleWebhookForward(ctx, evt, client)
